@@ -1,0 +1,8 @@
+{
+  "name": "أيمن سعيد العواضي | بورتفوليو مطور برمجيات وتطبيقات",
+  "description": "الموقع الشخصي وبورتفوليو الأعمال للمطور أيمن سعيد العواضي — تطوير تطبيقات الويب، تطبيقات Flutter، قواعد البيانات، والشبكات.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

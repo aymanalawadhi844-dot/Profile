@@ -1,0 +1,6 @@
+# السماح لجميع محركات البحث بأرشفة كامل الموقع
+# استبدل الرابط أدناه برابط موقعك النهائي على Vercel بعد النشر
+User-agent: *
+Allow: /
+
+Sitemap: https://ayman-alawadhi.vercel.app/sitemap.xml
