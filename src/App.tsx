@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { onAuthStateChanged, type User } from 'firebase/auth';
 import { CheckCircle2 } from 'lucide-react';
 import { AboutSection } from './components/AboutSection';
 import { AdminModal } from './components/AdminModal';
@@ -15,8 +16,13 @@ import {
   PORTFOLIO_STORAGE_KEY,
   type PortfolioData,
 } from './data/portfolioData';
+import { auth } from './firebase';
+import {
+  subscribeToPortfolio,
+  type FirestoreSyncState,
+} from './services/portfolioFirestore';
 
-function loadInitialPortfolioData(): PortfolioData {
+function loadCachedPortfolioData(): PortfolioData {
   try {
     const raw = window.localStorage.getItem(PORTFOLIO_STORAGE_KEY);
     if (!raw) return defaultPortfolioData;
@@ -52,11 +58,42 @@ function loadInitialPortfolioData(): PortfolioData {
 
 export default function App() {
   const [portfolioData, setPortfolioData] = useState<PortfolioData>(() =>
-    loadInitialPortfolioData()
+    loadCachedPortfolioData()
   );
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [syncState, setSyncState] = useState<FirestoreSyncState>({
+    hasRemoteSettings: false,
+    hasRemoteProjects: false,
+    hasRemoteServices: false,
+    hasRemoteSkills: false,
+  });
   const [selectedService, setSelectedService] = useState<string>('');
   const [adminOpen, setAdminOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // مراقبة حالة تسجيل الدخول في Firebase Auth
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setAuthUser(user);
+      setAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // الاستماع للتحديثات الفورية من Firebase Firestore
+  useEffect(() => {
+    const unsubscribe = subscribeToPortfolio((partial, flags) => {
+      setSyncState((prev) => ({ ...prev, ...flags }));
+      if (Object.keys(partial).length > 0) {
+        setPortfolioData((prev) => ({
+          ...prev,
+          ...partial,
+        }));
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
   // مزامنة رابط canonical مع رابط الموقع الفعلي أو المحدد في البيانات
   useEffect(() => {
@@ -69,7 +106,7 @@ export default function App() {
     }
   }, [portfolioData.contact.siteUrl]);
 
-  // حفظ التعديلات تلقائياً في localStorage
+  // تخزين نسخة محلية للتحميل السريع
   useEffect(() => {
     try {
       window.localStorage.setItem(
@@ -77,7 +114,7 @@ export default function App() {
         JSON.stringify(portfolioData)
       );
     } catch {
-      // في حال امتلاء مساحة التخزين بصورة كبيرة جداً
+      // تجاهل في حال امتلاء المساحة المحلية
     }
   }, [portfolioData]);
 
@@ -97,15 +134,6 @@ export default function App() {
     if (contactEl) {
       contactEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-  }, []);
-
-  const handleResetDefaults = useCallback(() => {
-    try {
-      window.localStorage.removeItem(PORTFOLIO_STORAGE_KEY);
-    } catch {
-      // تجاهل
-    }
-    setPortfolioData(defaultPortfolioData);
   }, []);
 
   return (
@@ -154,8 +182,9 @@ export default function App() {
         isOpen={adminOpen}
         onClose={() => setAdminOpen(false)}
         data={portfolioData}
-        onUpdateData={setPortfolioData}
-        onResetDefaults={handleResetDefaults}
+        authUser={authUser}
+        authReady={authReady}
+        syncState={syncState}
         onNotify={showToast}
       />
 

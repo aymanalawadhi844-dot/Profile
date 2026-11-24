@@ -1,14 +1,28 @@
-import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent } from 'react';
+import {
+  browserPopupRedirectResolver,
+  GoogleAuthProvider,
+  signInWithCredential,
+  signInWithPopup,
+  signOut,
+  type User,
+} from 'firebase/auth';
 import {
   Check,
+  Cloud,
   Download,
+  Loader2,
   Lock,
+  LogOut,
   Plus,
   RotateCcw,
+  Save,
+  ShieldAlert,
   Trash2,
   Upload,
   X,
 } from 'lucide-react';
+import firebaseConfig from '../../firebase-applet-config.json';
 import {
   PROJECT_CATEGORIES,
   type IconKey,
@@ -18,71 +32,262 @@ import {
   type ServiceItem,
   type SkillItem,
 } from '../data/portfolioData';
+import { auth, googleProvider } from '../firebase';
+import {
+  ADMIN_EMAIL,
+  compressImageToDataUrl,
+  isAuthorizedAdmin,
+  saveAllPortfolioToFirestore,
+  seedOrResetFirestoreDefaults,
+  type FirestoreSyncState,
+} from '../services/portfolioFirestore';
 import { ICON_OPTIONS } from './IconMapper';
 
 interface AdminModalProps {
   isOpen: boolean;
   onClose: () => void;
   data: PortfolioData;
-  onUpdateData: (next: PortfolioData) => void;
-  onResetDefaults: () => void;
+  authUser: User | null;
+  authReady: boolean;
+  syncState: FirestoreSyncState;
   onNotify: (msg: string) => void;
 }
 
-type AdminTab = 'profile' | 'projects' | 'services' | 'skills';
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        resolve(reader.result);
-      } else {
-        reject(new Error('تعذر قراءة الملف'));
-      }
-    };
-    reader.onerror = () => reject(new Error('فشل تحميل الصورة'));
-    reader.readAsDataURL(file);
-  });
-}
+type AdminTab = 'projects' | 'services' | 'skills' | 'profile';
 
 export function AdminModal({
   isOpen,
   onClose,
   data,
-  onUpdateData,
-  onResetDefaults,
+  authUser,
+  authReady,
+  syncState,
   onNotify,
 }: AdminModalProps) {
-  const [unlocked, setUnlocked] = useState(false);
-  const [passcodeInput, setPasscodeInput] = useState('');
-  const [passcodeError, setPasscodeError] = useState('');
+  const [draft, setDraft] = useState<PortfolioData>(data);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [activeTab, setActiveTab] = useState<AdminTab>('projects');
   const [confirmReset, setConfirmReset] = useState(false);
   const [copiedJson, setCopiedJson] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const gsiContainerRef = useRef<HTMLDivElement | null>(null);
+
+  const isAdmin = isAuthorizedAdmin(authUser);
+  const isFullySeeded =
+    syncState.hasRemoteSettings &&
+    syncState.hasRemoteProjects &&
+    syncState.hasRemoteServices &&
+    syncState.hasRemoteSkills;
+
+  // مزامنة المسودة عند فتح اللوحة أو وصول تحديثات جديدة بدون مسح تعديلات المستخدم غير المحفوظة
+  useEffect(() => {
+    if (isOpen && !hasUnsavedChanges) {
+      setDraft(data);
+    }
+  }, [isOpen, data, hasUnsavedChanges]);
 
   useEffect(() => {
     if (!isOpen) {
-      setPasscodeError('');
       setConfirmReset(false);
+      setErrorMsg(null);
     }
   }, [isOpen]);
 
+  // تحميل زر Google Identity Services المباشر كمسار إضافي آمن داخل الإطارات المضمّنة
+  useEffect(() => {
+    if (!isOpen || !authReady || authUser) return;
+    const clientId = firebaseConfig.oAuthClientId;
+    if (!clientId) return;
+
+    let cancelled = false;
+
+    const initGsi = () => {
+      const g = (
+        window as unknown as {
+          google?: {
+            accounts?: {
+              id?: {
+                initialize: (cfg: {
+                  client_id: string;
+                  callback: (res: { credential?: string }) => void;
+                }) => void;
+                renderButton: (
+                  el: HTMLElement,
+                  opts: Record<string, unknown>
+                ) => void;
+              };
+            };
+          };
+        }
+      ).google;
+
+      if (cancelled || !g?.accounts?.id || !gsiContainerRef.current) return;
+
+      g.accounts.id.initialize({
+        client_id: clientId,
+        callback: async (response: { credential?: string }) => {
+          if (!response.credential) return;
+          setIsAuthLoading(true);
+          setErrorMsg(null);
+          try {
+            const cred = GoogleAuthProvider.credential(response.credential);
+            const result = await signInWithCredential(auth, cred);
+            if (isAuthorizedAdmin(result.user)) {
+              onNotify('تم تسجيل الدخول وربط لوحة التحكم بـ Firebase');
+            } else {
+              setErrorMsg(`الحساب (${result.user.email}) غير مخوّل لإدارة الموقع.`);
+            }
+          } catch (err) {
+            setErrorMsg(
+              err instanceof Error ? err.message : 'تعذر التحقق من بيانات Google'
+            );
+          } finally {
+            setIsAuthLoading(false);
+          }
+        },
+      });
+
+      gsiContainerRef.current.innerHTML = '';
+      g.accounts.id.renderButton(gsiContainerRef.current, {
+        theme: 'filled_black',
+        size: 'large',
+        shape: 'pill',
+        text: 'signin_with',
+        locale: 'ar',
+        width: 320,
+      });
+    };
+
+    const existingScript = document.querySelector<HTMLScriptElement>(
+      'script[src="https://accounts.google.com/gsi/client"]'
+    );
+    if (existingScript) {
+      initGsi();
+    } else {
+      const script = document.createElement('script');
+      script.src = 'https://accounts.google.com/gsi/client';
+      script.async = true;
+      script.defer = true;
+      script.onload = initGsi;
+      document.head.appendChild(script);
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, authReady, authUser, onNotify]);
+
   if (!isOpen) return null;
 
-  const handleUnlock = (e: FormEvent) => {
-    e.preventDefault();
-    if (passcodeInput.trim() === data.adminPasscode) {
-      setUnlocked(true);
-      setPasscodeError('');
-      setPasscodeInput('');
-    } else {
-      setPasscodeError('رمز المرور غير صحيح');
+  const updateDraft = (updater: (prev: PortfolioData) => PortfolioData) => {
+    setDraft((prev) => updater(prev));
+    setHasUnsavedChanges(true);
+    setErrorMsg(null);
+  };
+
+  const handleGoogleLogin = async () => {
+    setIsAuthLoading(true);
+    setErrorMsg(null);
+    try {
+      const result = await signInWithPopup(
+        auth,
+        googleProvider,
+        browserPopupRedirectResolver
+      );
+      if (isAuthorizedAdmin(result.user)) {
+        onNotify('تم تسجيل الدخول وربط لوحة التحكم بـ Firebase');
+      } else {
+        setErrorMsg(`الحساب (${result.user.email}) غير مخوّل لإدارة الموقع.`);
+      }
+    } catch (error) {
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? String((error as { code?: unknown }).code)
+          : '';
+      const rawMsg =
+        error instanceof Error ? error.message : 'تعذر تسجيل الدخول عبر Google';
+
+      if (code === 'auth/popup-closed-by-user' || rawMsg.includes('popup-closed-by-user')) {
+        return;
+      }
+
+      if (code === 'auth/internal-error' || rawMsg.includes('auth/internal-error')) {
+        setErrorMsg(
+          'تعذر إتمام النافذة المنبثقة بسبب قيود المتصفح أو المعاينة المضمنة (auth/internal-error). جرّب زر تسجيل الدخول المباشر عبر Google أعلاه، أو تأكد من السماح بالنوافذ المنبثقة وعدم تفعيل مانع الإعلانات.'
+        );
+      } else if (code === 'auth/popup-blocked' || rawMsg.includes('popup-blocked')) {
+        setErrorMsg(
+          'قام المتصفح بحظر النافذة المنبثقة لتسجيل الدخول. اسمح بالنوافذ المنبثقة لهذا الموقع أو افتحه في تبويب مستقل.'
+        );
+      } else if (
+        code === 'auth/unauthorized-domain' ||
+        rawMsg.includes('unauthorized-domain')
+      ) {
+        setErrorMsg(
+          `النطاق الحالي (${window.location.hostname}) غير مضاف ضمن النطاقات المصرّح بها (Authorized Domains) في إعدادات Firebase Authentication.`
+        );
+      } else {
+        setErrorMsg(rawMsg);
+      }
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    setIsAuthLoading(true);
+    setErrorMsg(null);
+    try {
+      await signOut(auth);
+      setHasUnsavedChanges(false);
+      onNotify('تم تسجيل الخروج بنجاح');
+    } catch {
+      setErrorMsg('تعذر تسجيل الخروج حالياً');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleSaveToFirebase = async () => {
+    if (!authUser || !isAdmin) return;
+    setIsSaving(true);
+    setErrorMsg(null);
+    try {
+      await saveAllPortfolioToFirestore(draft, authUser.uid);
+      setHasUnsavedChanges(false);
+      onNotify('تم حفظ جميع التغييرات في Firebase بنجاح');
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'حدث خطأ أثناء الحفظ في Firebase';
+      setErrorMsg(message);
+      onNotify('تعذر الحفظ في Firebase، تحقق من التفاصيل');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleResetDefaultsInFirebase = async () => {
+    if (!authUser || !isAdmin) return;
+    setIsSaving(true);
+    setErrorMsg(null);
+    try {
+      await seedOrResetFirestoreDefaults(authUser.uid);
+      setHasUnsavedChanges(false);
+      setConfirmReset(false);
+      onNotify('تمت مزامنة البيانات الافتراضية في Firebase');
+    } catch (error) {
+      setErrorMsg(
+        error instanceof Error ? error.message : 'فشل استعادة البيانات في Firebase'
+      );
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const handleExportJson = async () => {
-    const jsonString = JSON.stringify(data, null, 2);
+    const jsonString = JSON.stringify(draft, null, 2);
     try {
       await navigator.clipboard.writeText(jsonString);
       setCopiedJson(true);
@@ -107,14 +312,14 @@ export function AdminModal({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const dataUrl = await readFileAsDataUrl(file);
-      onUpdateData({
-        ...data,
-        profile: { ...data.profile, profileImage: dataUrl },
-      });
-      onNotify('تم تحديث الصورة الشخصية في المعاينة المحلية');
-    } catch {
-      onNotify('تعذر قراءة ملف الصورة');
+      const compressed = await compressImageToDataUrl(file);
+      updateDraft((prev) => ({
+        ...prev,
+        profile: { ...prev.profile, profileImage: compressed },
+      }));
+      onNotify('تم تجهيز الصورة الشخصية — اضغط "حفظ في Firebase" للاعتماد');
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'تعذر قراءة ملف الصورة');
     }
   };
 
@@ -125,20 +330,20 @@ export function AdminModal({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const dataUrl = await readFileAsDataUrl(file);
-      onUpdateData({
-        ...data,
-        projects: data.projects.map((p) =>
-          p.id === projectId ? { ...p, image: dataUrl } : p
+      const compressed = await compressImageToDataUrl(file);
+      updateDraft((prev) => ({
+        ...prev,
+        projects: prev.projects.map((p) =>
+          p.id === projectId ? { ...p, image: compressed } : p
         ),
-      });
-      onNotify('تم رفع صورة المشروع وحفظها محلياً');
-    } catch {
-      onNotify('تعذر قراءة صورة المشروع');
+      }));
+      onNotify('تم تجهيز صورة المشروع — اضغط "حفظ في Firebase" للاعتماد');
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'تعذر معالجة صورة المشروع');
     }
   };
 
-  // إدارة المشاريع
+  // إدارة المشاريع في المسودة
   const addProject = () => {
     const newProject: ProjectItem = {
       id: `project-${Date.now()}`,
@@ -151,31 +356,29 @@ export function AdminModal({
       technologies: ['React', 'TypeScript'],
       highlights: ['أداء سريع وواجهة حديثة', 'كود منظم وقابل للتوسع'],
       liveUrl: '',
-      githubUrl: data.contact.github,
+      githubUrl: draft.contact.github,
     };
-    onUpdateData({
-      ...data,
-      projects: [newProject, ...data.projects],
-    });
-    onNotify('تمت إضافة بطاقة مشروع جديدة');
+    updateDraft((prev) => ({
+      ...prev,
+      projects: [newProject, ...prev.projects],
+    }));
   };
 
   const updateProject = (id: string, patch: Partial<ProjectItem>) => {
-    onUpdateData({
-      ...data,
-      projects: data.projects.map((p) => (p.id === id ? { ...p, ...patch } : p)),
-    });
+    updateDraft((prev) => ({
+      ...prev,
+      projects: prev.projects.map((p) => (p.id === id ? { ...p, ...patch } : p)),
+    }));
   };
 
   const deleteProject = (id: string) => {
-    onUpdateData({
-      ...data,
-      projects: data.projects.filter((p) => p.id !== id),
-    });
-    onNotify('تم حذف المشروع');
+    updateDraft((prev) => ({
+      ...prev,
+      projects: prev.projects.filter((p) => p.id !== id),
+    }));
   };
 
-  // إدارة الخدمات
+  // إدارة الخدمات في المسودة
   const addService = () => {
     const newService: ServiceItem = {
       id: `service-${Date.now()}`,
@@ -184,29 +387,27 @@ export function AdminModal({
       icon: 'code',
       deliverables: ['تنفيذ احترافي وفق المتطلبات', 'دعم فني وتوثيق'],
     };
-    onUpdateData({
-      ...data,
-      services: [...data.services, newService],
-    });
-    onNotify('تمت إضافة خدمة جديدة');
+    updateDraft((prev) => ({
+      ...prev,
+      services: [...prev.services, newService],
+    }));
   };
 
   const updateService = (id: string, patch: Partial<ServiceItem>) => {
-    onUpdateData({
-      ...data,
-      services: data.services.map((s) => (s.id === id ? { ...s, ...patch } : s)),
-    });
+    updateDraft((prev) => ({
+      ...prev,
+      services: prev.services.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+    }));
   };
 
   const deleteService = (id: string) => {
-    onUpdateData({
-      ...data,
-      services: data.services.filter((s) => s.id !== id),
-    });
-    onNotify('تم حذف الخدمة');
+    updateDraft((prev) => ({
+      ...prev,
+      services: prev.services.filter((s) => s.id !== id),
+    }));
   };
 
-  // إدارة المهارات
+  // إدارة المهارات في المسودة
   const addSkill = () => {
     const newSkill: SkillItem = {
       id: `skill-${Date.now()}`,
@@ -215,26 +416,24 @@ export function AdminModal({
       icon: 'terminal',
       technologies: ['Technology 1', 'Technology 2'],
     };
-    onUpdateData({
-      ...data,
-      skills: [...data.skills, newSkill],
-    });
-    onNotify('تمت إضافة مهارة جديدة');
+    updateDraft((prev) => ({
+      ...prev,
+      skills: [...prev.skills, newSkill],
+    }));
   };
 
   const updateSkill = (id: string, patch: Partial<SkillItem>) => {
-    onUpdateData({
-      ...data,
-      skills: data.skills.map((sk) => (sk.id === id ? { ...sk, ...patch } : sk)),
-    });
+    updateDraft((prev) => ({
+      ...prev,
+      skills: prev.skills.map((sk) => (sk.id === id ? { ...sk, ...patch } : sk)),
+    }));
   };
 
   const deleteSkill = (id: string) => {
-    onUpdateData({
-      ...data,
-      skills: data.skills.filter((sk) => sk.id !== id),
-    });
-    onNotify('تم حذف المهارة');
+    updateDraft((prev) => ({
+      ...prev,
+      skills: prev.skills.filter((sk) => sk.id !== id),
+    }));
   };
 
   return (
@@ -249,69 +448,125 @@ export function AdminModal({
         className="relative flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#121216] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* ترويسة لوحة الإدارة */}
-        <div className="flex items-center justify-between gap-4 border-b border-white/[0.08] bg-[#0A0A0C] px-5 py-4">
-          <div className="flex items-center gap-2.5">
-            <Lock className="h-5 w-5 text-[#D4AF37]" aria-hidden="true" />
-            <h2 id="admin-modal-title" className="text-base sm:text-lg font-bold text-white">
-              لوحة إدارة البطاقات والصور
-            </h2>
+        {/* ترويسة لوحة التحكم */}
+        <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/[0.08] bg-[#0A0A0C] px-5 py-4">
+          <div className="flex items-center gap-3">
+            <Cloud className="h-5 w-5 text-[#D4AF37]" aria-hidden="true" />
+            <div>
+              <h2 id="admin-modal-title" className="text-base sm:text-lg font-bold text-white">
+                لوحة التحكم — Firebase
+              </h2>
+              {authUser && isAdmin && (
+                <p dir="ltr" className="text-right font-mono-code text-[11px] text-zinc-400">
+                  {authUser.email}
+                </p>
+              )}
+            </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="إغلاق لوحة الإدارة"
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-[#121216] text-zinc-300 hover:border-[#D4AF37] hover:text-white"
-          >
-            <X className="h-4 w-4" aria-hidden="true" />
-          </button>
+          <div className="flex items-center gap-2">
+            {authUser && (
+              <button
+                type="button"
+                onClick={handleSignOut}
+                disabled={isAuthLoading}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-[#121216] px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-[#D4AF37]/50 hover:text-white disabled:opacity-50"
+              >
+                <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>تسجيل الخروج</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="إغلاق لوحة التحكم"
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-[#121216] text-zinc-300 hover:border-[#D4AF37] hover:text-white"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
         </div>
 
-        {/* شاشة رمز المرور */}
-        {!unlocked ? (
-          <form
-            onSubmit={handleUnlock}
-            className="mx-auto my-12 w-full max-w-sm space-y-5 px-6 text-center"
-          >
+        {/* حالة انتظار المصادقة أو شاشة تسجيل الدخول عبر Google */}
+        {!authReady ? (
+          <div className="flex flex-col items-center justify-center gap-3 py-16 text-zinc-300">
+            <Loader2 className="h-7 w-7 animate-spin text-[#D4AF37]" aria-hidden="true" />
+            <p className="text-sm">جاري التحقق من حالة Firebase Auth...</p>
+          </div>
+        ) : !authUser ? (
+          <div className="mx-auto my-12 w-full max-w-md space-y-6 px-6 text-center">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-[#D4AF37]/30 bg-[#D4AF37]/10 text-[#F3E5AB]">
               <Lock className="h-6 w-6" aria-hidden="true" />
             </div>
 
-            <div className="space-y-1.5">
-              <h3 className="text-lg font-bold text-white">أدخل رمز مرور الإدارة</h3>
-              <p className="text-xs leading-relaxed text-zinc-400">
-                الرمز الافتراضي هو <span className="font-mono-code text-[#F3E5AB]">2026</span> ويمكن تغييره من ملف{' '}
-                <span dir="ltr" className="font-mono-code text-zinc-300">src/data/portfolioData.ts</span>{' '}
-                أو من داخل اللوحة.
+            <div className="space-y-2">
+              <h3 className="text-xl font-bold text-white">
+                تسجيل الدخول لإدارة الموقع
+              </h3>
+              <p className="text-xs sm:text-sm leading-relaxed text-zinc-400">
+                لوحة التحكم مربوطة بقاعدة بيانات <strong className="text-zinc-200">Firebase Firestore</strong>. سجّل الدخول بحساب مدير الموقع (<span dir="ltr" className="font-mono-code text-[#F3E5AB]">{ADMIN_EMAIL}</span>) لحفظ التعديلات ومزامنتها فوراً لجميع الزوار.
               </p>
             </div>
 
-            <div className="space-y-2 text-right">
-              <label htmlFor="admin-passcode" className="sr-only">
-                رمز المرور
-              </label>
-              <input
-                id="admin-passcode"
-                type="password"
-                autoFocus
-                value={passcodeInput}
-                onChange={(e) => setPasscodeInput(e.target.value)}
-                placeholder="أدخل رمز المرور..."
-                className="w-full rounded-xl border border-white/15 bg-[#0A0A0C] px-4 py-3 text-center font-mono-code text-sm text-white focus:border-[#D4AF37] focus:outline-none"
-              />
-              {passcodeError && (
-                <p className="text-xs font-medium text-rose-400">{passcodeError}</p>
-              )}
-            </div>
+            {errorMsg && (
+              <div className="rounded-xl border border-rose-500/30 bg-rose-950/30 p-3.5 text-xs leading-relaxed text-rose-200 text-right">
+                {errorMsg}
+              </div>
+            )}
 
+            <div className="space-y-3">
+              {/* زر Google Identity Services المباشر */}
+              <div
+                ref={gsiContainerRef}
+                className="flex min-h-[44px] items-center justify-center"
+              />
+
+              <div className="relative flex items-center py-1">
+                <div className="flex-grow border-t border-white/10" />
+                <span className="mx-3 text-[11px] text-zinc-500">أو</span>
+                <div className="flex-grow border-t border-white/10" />
+              </div>
+
+              <button
+                type="button"
+                onClick={handleGoogleLogin}
+                disabled={isAuthLoading}
+                className="inline-flex w-full items-center justify-center gap-2.5 rounded-xl gold-gradient-bg px-5 py-3 text-sm font-bold text-[#0A0A0C] transition-transform duration-150 hover:scale-[1.01] disabled:opacity-60"
+              >
+                {isAuthLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Cloud className="h-4 w-4" aria-hidden="true" />
+                )}
+                <span>تسجيل الدخول بحساب Google (Firebase Popup)</span>
+              </button>
+            </div>
+          </div>
+        ) : !isAdmin ? (
+          <div className="mx-auto my-12 w-full max-w-md space-y-5 px-6 text-center">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-rose-500/30 bg-rose-500/10 text-rose-300">
+              <ShieldAlert className="h-6 w-6" aria-hidden="true" />
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-lg font-bold text-white">حساب غير مخوّل للتعديل</h3>
+              <p className="text-xs sm:text-sm leading-relaxed text-zinc-400">
+                أنت مسجل حالياً بالبريد{' '}
+                <span dir="ltr" className="font-mono-code text-zinc-200">
+                  {authUser.email}
+                </span>
+                . التعديل والنشر في Firebase مقتصر على مالك البورتفوليو فقط.
+              </p>
+            </div>
             <button
-              type="submit"
-              className="w-full rounded-xl gold-gradient-bg py-2.5 text-sm font-bold text-[#0A0A0C]"
+              type="button"
+              onClick={handleSignOut}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-[#D4AF37]/40 bg-[#0A0A0C] px-5 py-2.5 text-sm font-bold text-[#F3E5AB] hover:bg-[#D4AF37]/10"
             >
-              فتح لوحة التحكم
+              <LogOut className="h-4 w-4" aria-hidden="true" />
+              <span>تسجيل الخروج وتبديل الحساب</span>
             </button>
-          </form>
+          </div>
         ) : (
           <>
             {/* شريط التبويبات والإجراءات */}
@@ -319,9 +574,9 @@ export function AdminModal({
               <div className="flex flex-wrap items-center gap-1.5">
                 {(
                   [
-                    { id: 'projects', label: `المشاريع (${data.projects.length})` },
-                    { id: 'services', label: `الخدمات (${data.services.length})` },
-                    { id: 'skills', label: `المهارات (${data.skills.length})` },
+                    { id: 'projects', label: `المشاريع (${draft.projects.length})` },
+                    { id: 'services', label: `الخدمات (${draft.services.length})` },
+                    { id: 'skills', label: `المهارات (${draft.skills.length})` },
                     { id: 'profile', label: 'البروفايل والروابط' },
                   ] as Array<{ id: AdminTab; label: string }>
                 ).map((tab) => (
@@ -343,18 +598,40 @@ export function AdminModal({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
+                  onClick={handleSaveToFirebase}
+                  disabled={isSaving}
+                  className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-xs font-bold transition-all disabled:opacity-60 ${
+                    hasUnsavedChanges
+                      ? 'gold-gradient-bg text-[#0A0A0C] shadow-lg shadow-[#D4AF37]/25'
+                      : 'border border-[#D4AF37]/50 bg-[#0A0A0C] text-[#F3E5AB] hover:bg-[#D4AF37]/15'
+                  }`}
+                >
+                  {isSaving ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Save className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                  <span>
+                    {hasUnsavedChanges
+                      ? 'حفظ التغييرات في Firebase'
+                      : 'مزامنة وحفظ في Firebase'}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={handleExportJson}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#D4AF37]/40 bg-[#0A0A0C] px-3 py-1.5 text-xs font-bold text-[#F3E5AB] hover:border-[#D4AF37] hover:bg-[#D4AF37]/10"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-[#0A0A0C] px-3 py-1.5 text-xs font-medium text-zinc-200 hover:border-[#D4AF37]/40 hover:text-[#F3E5AB]"
                 >
                   {copiedJson ? (
                     <>
-                      <Check className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>تم النسخ والتنزيل</span>
+                      <Check className="h-3.5 w-3.5 text-[#D4AF37]" aria-hidden="true" />
+                      <span>تم التصدير</span>
                     </>
                   ) : (
                     <>
                       <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>تصدير البيانات JSON</span>
+                      <span>تصدير JSON</span>
                     </>
                   )}
                 </button>
@@ -371,14 +648,11 @@ export function AdminModal({
                 ) : (
                   <button
                     type="button"
-                    onClick={() => {
-                      onResetDefaults();
-                      setConfirmReset(false);
-                      onNotify('تمت استعادة البيانات الافتراضية');
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-500"
+                    onClick={handleResetDefaultsInFirebase}
+                    disabled={isSaving}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-rose-500 disabled:opacity-60"
                   >
-                    <span>تأكيد الاستعادة</span>
+                    <span>تأكيد الاستعادة في Firebase</span>
                   </button>
                 )}
               </div>
@@ -386,9 +660,30 @@ export function AdminModal({
 
             {/* محتوى التبويب النشط */}
             <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-6">
-              {/* تنبيه الحفظ التلقائي */}
-              <div className="rounded-xl border border-[#D4AF37]/25 bg-[#D4AF37]/[0.06] px-4 py-3 text-xs leading-relaxed text-zinc-200">
-                يتم حفظ جميع التعديلات تلقائياً في المتصفح (<span className="font-mono-code">localStorage</span>). قبل النشر على Vercel، استخدم زر <strong>تصدير البيانات JSON</strong> أعلاه وانسخ التغييرات إلى ملف <span dir="ltr" className="font-mono-code text-[#F3E5AB]">src/data/portfolioData.ts</span> لتظهر لجميع الزوار.
+              {errorMsg && (
+                <div className="rounded-xl border border-rose-500/35 bg-rose-950/30 px-4 py-3 text-xs text-rose-200 break-words">
+                  {errorMsg}
+                </div>
+              )}
+
+              {/* تنبيه حالة الربط مع Firebase */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#D4AF37]/25 bg-[#D4AF37]/[0.06] px-4 py-3 text-xs leading-relaxed text-zinc-200">
+                <div>
+                  {isFullySeeded ? (
+                    <span>
+                      متصل بـ <strong>Firebase Firestore</strong> — أي تعديل تضغط له <strong>حفظ في Firebase</strong> يُحدَّث مباشرة لجميع الزوار في الوقت الفعلي.
+                    </span>
+                  ) : (
+                    <span>
+                      قاعدة بيانات Firestore جاهزة! اضغط على <strong>حفظ في Firebase</strong> لرفع البيانات الحالية وتفعيل التعديل السحابي المباشر.
+                    </span>
+                  )}
+                </div>
+                {hasUnsavedChanges && (
+                  <span className="font-bold text-[#F3E5AB]">
+                    توجد تعديلات بانتظار الحفظ
+                  </span>
+                )}
               </div>
 
               {/* تبويب المشاريع */}
@@ -407,7 +702,7 @@ export function AdminModal({
                   </div>
 
                   <div className="space-y-4">
-                    {data.projects.map((project) => (
+                    {draft.projects.map((project) => (
                       <div
                         key={project.id}
                         className="rounded-xl border border-white/10 bg-[#0A0A0C] p-4 sm:p-5 space-y-4"
@@ -476,13 +771,17 @@ export function AdminModal({
                         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                           <div className="space-y-1.5">
                             <label className="block text-xs text-zinc-400">
-                              مسار الصورة أو رابطها (مثل /projects/app.jpg)
+                              مسار الصورة أو رابطها (أو ارفع صورة مضغوطة لـ Firebase)
                             </label>
                             <div className="flex gap-2">
                               <input
                                 type="text"
                                 dir="ltr"
-                                value={project.image.startsWith('data:') ? 'صورة مرفوعة محلياً (Base64)' : project.image}
+                                value={
+                                  project.image.startsWith('data:')
+                                    ? 'صورة مرفوعة ومضغوطة (DataURL)'
+                                    : project.image
+                                }
                                 onChange={(e) =>
                                   updateProject(project.id, { image: e.target.value })
                                 }
@@ -535,7 +834,9 @@ export function AdminModal({
                         </div>
 
                         <div className="space-y-1.5">
-                          <label className="block text-xs text-zinc-400">الوصف الكامل في نافذة التفاصيل</label>
+                          <label className="block text-xs text-zinc-400">
+                            الوصف الكامل في نافذة التفاصيل
+                          </label>
                           <textarea
                             rows={2}
                             value={project.description}
@@ -548,7 +849,9 @@ export function AdminModal({
 
                         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                           <div className="space-y-1.5">
-                            <label className="block text-xs text-zinc-400">رابط المعاينة (اختياري)</label>
+                            <label className="block text-xs text-zinc-400">
+                              رابط المعاينة (اختياري)
+                            </label>
                             <input
                               type="url"
                               dir="ltr"
@@ -562,7 +865,9 @@ export function AdminModal({
                           </div>
 
                           <div className="space-y-1.5">
-                            <label className="block text-xs text-zinc-400">رابط GitHub (اختياري)</label>
+                            <label className="block text-xs text-zinc-400">
+                              رابط GitHub (اختياري)
+                            </label>
                             <input
                               type="url"
                               dir="ltr"
@@ -597,7 +902,7 @@ export function AdminModal({
                   </div>
 
                   <div className="space-y-4">
-                    {data.services.map((service) => (
+                    {draft.services.map((service) => (
                       <div
                         key={service.id}
                         className="rounded-xl border border-white/10 bg-[#0A0A0C] p-4 space-y-3"
@@ -701,7 +1006,7 @@ export function AdminModal({
                   </div>
 
                   <div className="space-y-4">
-                    {data.skills.map((skill) => (
+                    {draft.skills.map((skill) => (
                       <div
                         key={skill.id}
                         className="rounded-xl border border-white/10 bg-[#0A0A0C] p-4 space-y-3"
@@ -800,8 +1105,8 @@ export function AdminModal({
 
                     <div className="flex flex-wrap items-center gap-4">
                       <img
-                        src={data.profile.profileImage}
-                        alt={data.profile.fullName}
+                        src={draft.profile.profileImage}
+                        alt={draft.profile.fullName}
                         className="h-16 w-16 rounded-full border border-[#D4AF37]/50 object-cover object-top bg-[#121216]"
                       />
                       <div className="flex-1 min-w-[220px] space-y-1.5">
@@ -813,18 +1118,18 @@ export function AdminModal({
                             type="text"
                             dir="ltr"
                             value={
-                              data.profile.profileImage.startsWith('data:')
-                                ? 'صورة مرفوعة محلياً (Base64)'
-                                : data.profile.profileImage
+                              draft.profile.profileImage.startsWith('data:')
+                                ? 'صورة مرفوعة ومضغوطة (DataURL)'
+                                : draft.profile.profileImage
                             }
                             onChange={(e) =>
-                              onUpdateData({
-                                ...data,
+                              updateDraft((prev) => ({
+                                ...prev,
                                 profile: {
-                                  ...data.profile,
+                                  ...prev.profile,
                                   profileImage: e.target.value,
                                 },
-                              })
+                              }))
                             }
                             className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-xs text-white focus:border-[#D4AF37] focus:outline-none"
                           />
@@ -844,71 +1149,57 @@ export function AdminModal({
 
                     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                       <div className="space-y-1.5">
-                        <label className="block text-xs text-zinc-400">الاسم الكامل (بالعربية)</label>
+                        <label className="block text-xs text-zinc-400">
+                          الاسم الكامل (بالعربية)
+                        </label>
                         <input
                           type="text"
-                          value={data.profile.fullName}
+                          value={draft.profile.fullName}
                           onChange={(e) =>
-                            onUpdateData({
-                              ...data,
-                              profile: { ...data.profile, fullName: e.target.value },
-                            })
+                            updateDraft((prev) => ({
+                              ...prev,
+                              profile: { ...prev.profile, fullName: e.target.value },
+                            }))
                           }
                           className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-sm text-white focus:border-[#D4AF37] focus:outline-none"
                         />
                       </div>
 
                       <div className="space-y-1.5">
-                        <label className="block text-xs text-zinc-400">الاسم بالإنجليزية (SEO)</label>
+                        <label className="block text-xs text-zinc-400">
+                          الاسم بالإنجليزية (SEO)
+                        </label>
                         <input
                           type="text"
                           dir="ltr"
-                          value={data.profile.englishName}
+                          value={draft.profile.englishName}
                           onChange={(e) =>
-                            onUpdateData({
-                              ...data,
-                              profile: { ...data.profile, englishName: e.target.value },
-                            })
+                            updateDraft((prev) => ({
+                              ...prev,
+                              profile: { ...prev.profile, englishName: e.target.value },
+                            }))
                           }
                           className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-sm font-mono-code text-white focus:border-[#D4AF37] focus:outline-none"
                         />
                       </div>
 
-                      <div className="space-y-1.5">
+                      <div className="space-y-1.5 sm:col-span-2">
                         <label className="block text-xs text-zinc-400">
-                          نص الشارة العائمة أسفل الصورة
+                          نص الشارة أسفل الصورة الشخصية
                         </label>
                         <input
                           type="text"
-                          value={data.profile.floatingBadgeText}
+                          value={draft.profile.floatingBadgeText}
                           onChange={(e) =>
-                            onUpdateData({
-                              ...data,
+                            updateDraft((prev) => ({
+                              ...prev,
                               profile: {
-                                ...data.profile,
+                                ...prev.profile,
                                 floatingBadgeText: e.target.value,
                               },
-                            })
+                            }))
                           }
                           className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-xs text-white focus:border-[#D4AF37] focus:outline-none"
-                        />
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <label className="block text-xs text-zinc-400">
-                          رمز مرور لوحة الإدارة
-                        </label>
-                        <input
-                          type="text"
-                          dir="ltr"
-                          value={data.adminPasscode}
-                          onChange={(e) =>
-                            onUpdateData({
-                              ...data,
-                              adminPasscode: e.target.value,
-                            })
-                          }
-                          className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-sm font-mono-code text-white focus:border-[#D4AF37] focus:outline-none"
                         />
                       </div>
                     </div>
@@ -919,12 +1210,12 @@ export function AdminModal({
                       </label>
                       <textarea
                         rows={2}
-                        value={data.profile.heroBio}
+                        value={draft.profile.heroBio}
                         onChange={(e) =>
-                          onUpdateData({
-                            ...data,
-                            profile: { ...data.profile, heroBio: e.target.value },
-                          })
+                          updateDraft((prev) => ({
+                            ...prev,
+                            profile: { ...prev.profile, heroBio: e.target.value },
+                          }))
                         }
                         className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-xs text-white focus:border-[#D4AF37] focus:outline-none"
                       />
@@ -944,12 +1235,12 @@ export function AdminModal({
                         <input
                           type="url"
                           dir="ltr"
-                          value={data.contact.siteUrl}
+                          value={draft.contact.siteUrl}
                           onChange={(e) =>
-                            onUpdateData({
-                              ...data,
-                              contact: { ...data.contact, siteUrl: e.target.value },
-                            })
+                            updateDraft((prev) => ({
+                              ...prev,
+                              contact: { ...prev.contact, siteUrl: e.target.value },
+                            }))
                           }
                           placeholder="https://your-site.vercel.app"
                           className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-xs text-white focus:border-[#D4AF37] focus:outline-none"
@@ -961,12 +1252,12 @@ export function AdminModal({
                         <input
                           type="email"
                           dir="ltr"
-                          value={data.contact.email}
+                          value={draft.contact.email}
                           onChange={(e) =>
-                            onUpdateData({
-                              ...data,
-                              contact: { ...data.contact, email: e.target.value },
-                            })
+                            updateDraft((prev) => ({
+                              ...prev,
+                              contact: { ...prev.contact, email: e.target.value },
+                            }))
                           }
                           className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-xs text-white focus:border-[#D4AF37] focus:outline-none"
                         />
@@ -979,12 +1270,12 @@ export function AdminModal({
                         <input
                           type="text"
                           dir="ltr"
-                          value={data.contact.whatsapp}
+                          value={draft.contact.whatsapp}
                           onChange={(e) =>
-                            onUpdateData({
-                              ...data,
-                              contact: { ...data.contact, whatsapp: e.target.value },
-                            })
+                            updateDraft((prev) => ({
+                              ...prev,
+                              contact: { ...prev.contact, whatsapp: e.target.value },
+                            }))
                           }
                           className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-xs text-white focus:border-[#D4AF37] focus:outline-none"
                         />
@@ -995,28 +1286,30 @@ export function AdminModal({
                         <input
                           type="url"
                           dir="ltr"
-                          value={data.contact.github}
+                          value={draft.contact.github}
                           onChange={(e) =>
-                            onUpdateData({
-                              ...data,
-                              contact: { ...data.contact, github: e.target.value },
-                            })
+                            updateDraft((prev) => ({
+                              ...prev,
+                              contact: { ...prev.contact, github: e.target.value },
+                            }))
                           }
                           className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-xs text-white focus:border-[#D4AF37] focus:outline-none"
                         />
                       </div>
 
                       <div className="space-y-1.5">
-                        <label className="block text-xs text-zinc-400">رابط LinkedIn (اختياري)</label>
+                        <label className="block text-xs text-zinc-400">
+                          رابط LinkedIn (اختياري)
+                        </label>
                         <input
                           type="url"
                           dir="ltr"
-                          value={data.contact.linkedin ?? ''}
+                          value={draft.contact.linkedin ?? ''}
                           onChange={(e) =>
-                            onUpdateData({
-                              ...data,
-                              contact: { ...data.contact, linkedin: e.target.value },
-                            })
+                            updateDraft((prev) => ({
+                              ...prev,
+                              contact: { ...prev.contact, linkedin: e.target.value },
+                            }))
                           }
                           className="w-full rounded-lg border border-white/10 bg-[#121216] px-3 py-2 text-xs text-white focus:border-[#D4AF37] focus:outline-none"
                         />

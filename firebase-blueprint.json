@@ -1,0 +1,270 @@
+{
+  "entities": {
+    "SiteSettings": {
+      "title": "SiteSettings",
+      "description": "Global portfolio configuration including profile info, hero stats, developer snippet, and public contact channels.",
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "object",
+          "description": "Profile presentation metadata and portrait path."
+        },
+        "stats": {
+          "type": "array",
+          "description": "Hero highlight statistics (max 6 items)."
+        },
+        "developerCard": {
+          "type": "object",
+          "description": "Structured developer.js card fields."
+        },
+        "contact": {
+          "type": "object",
+          "description": "Public contact channels and canonical siteUrl."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update."
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "UID of the authenticated admin who updated settings."
+        }
+      },
+      "required": ["profile", "stats", "developerCard", "contact", "updatedAt", "updatedBy"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "Portfolio project showcase card.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "category": {
+          "type": "string",
+          "enum": ["الويب", "Flutter", "قواعد البيانات", "الشبكات"]
+        },
+        "year": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "image": {
+          "type": "string",
+          "maxLength": 250000
+        },
+        "technologies": {
+          "type": "array",
+          "description": "List of technologies (max 15 items)."
+        },
+        "highlights": {
+          "type": "array",
+          "description": "Key project highlights (max 15 items)."
+        },
+        "liveUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "githubUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "sortOrder": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "category",
+        "year",
+        "summary",
+        "description",
+        "image",
+        "technologies",
+        "highlights",
+        "sortOrder",
+        "updatedAt",
+        "updatedBy"
+      ]
+    },
+    "Service": {
+      "title": "Service",
+      "description": "Portfolio service offering card.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "icon": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "deliverables": {
+          "type": "array",
+          "description": "Key deliverables (max 15 items)."
+        },
+        "sortOrder": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "description",
+        "icon",
+        "deliverables",
+        "sortOrder",
+        "updatedAt",
+        "updatedBy"
+      ]
+    },
+    "Skill": {
+      "title": "Skill",
+      "description": "Portfolio technical skill card.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "icon": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "technologies": {
+          "type": "array",
+          "description": "Skill technologies (max 20 items)."
+        },
+        "sortOrder": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedBy": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "description",
+        "icon",
+        "technologies",
+        "sortOrder",
+        "updatedAt",
+        "updatedBy"
+      ]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Trusted admin user registry.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/siteSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/SiteSettings" },
+      "description": "Public portfolio configuration document (document ID: main)."
+    },
+    "/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/Project" },
+      "description": "Portfolio project showcase documents."
+    },
+    "/services/{serviceId}": {
+      "schema": { "$ref": "#/entities/Service" },
+      "description": "Portfolio service offering documents."
+    },
+    "/skills/{skillId}": {
+      "schema": { "$ref": "#/entities/Skill" },
+      "description": "Portfolio technical skill documents."
+    },
+    "/admins/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Authorized admin UID documents."
+    }
+  }
+}

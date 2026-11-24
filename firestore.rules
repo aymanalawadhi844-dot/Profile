@@ -1,0 +1,387 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable Hardened Helpers
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'aymanalawadhi844@gmail.com';
+    }
+
+    function isAdmin() {
+      return isSuperAdmin()
+        || (
+          isSignedIn()
+          && request.auth.token.email_verified == true
+          && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        );
+    }
+
+    function isValidNonEmptyString(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isValidOptionalString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    function isValidStringList(listVal, maxItems) {
+      return listVal is list
+        && listVal.size() <= maxItems
+        && (listVal.size() == 0 || listVal[0] is string);
+    }
+
+    function isValidProfileMap(p) {
+      return p is map
+        && p.keys().hasAll([
+          'greeting',
+          'fullName',
+          'englishName',
+          'brandTitle',
+          'roleTitles',
+          'heroBio',
+          'aboutHeading',
+          'aboutParagraphs',
+          'profileImage',
+          'floatingBadgeText'
+        ])
+        && p.keys().hasOnly([
+          'greeting',
+          'fullName',
+          'englishName',
+          'brandTitle',
+          'roleTitles',
+          'heroBio',
+          'aboutHeading',
+          'aboutParagraphs',
+          'profileImage',
+          'floatingBadgeText'
+        ])
+        && isValidNonEmptyString(p.greeting, 200)
+        && isValidNonEmptyString(p.fullName, 160)
+        && isValidOptionalString(p.englishName, 160)
+        && isValidNonEmptyString(p.brandTitle, 100)
+        && isValidStringList(p.roleTitles, 10)
+        && isValidNonEmptyString(p.heroBio, 1000)
+        && isValidNonEmptyString(p.aboutHeading, 300)
+        && isValidStringList(p.aboutParagraphs, 10)
+        && isValidOptionalString(p.profileImage, 250000)
+        && isValidOptionalString(p.floatingBadgeText, 120);
+    }
+
+    function isValidDeveloperCardMap(d) {
+      return d is map
+        && d.keys().hasAll(['name', 'role', 'mobile', 'languages', 'databases', 'focus'])
+        && d.keys().hasOnly(['name', 'role', 'mobile', 'languages', 'databases', 'focus'])
+        && isValidNonEmptyString(d.name, 200)
+        && isValidNonEmptyString(d.role, 200)
+        && isValidStringList(d.mobile, 10)
+        && isValidStringList(d.languages, 10)
+        && isValidStringList(d.databases, 10)
+        && isValidNonEmptyString(d.focus, 200);
+    }
+
+    function isValidContactMap(c) {
+      return c is map
+        && c.keys().hasAll(['siteUrl', 'email', 'whatsapp', 'github', 'location'])
+        && c.keys().hasOnly(['siteUrl', 'email', 'whatsapp', 'github', 'linkedin', 'location'])
+        && isValidOptionalString(c.siteUrl, 300)
+        && isValidNonEmptyString(c.email, 200)
+        && isValidNonEmptyString(c.whatsapp, 40)
+        && isValidOptionalString(c.github, 300)
+        && (!('linkedin' in c) || isValidOptionalString(c.linkedin, 300))
+        && isValidOptionalString(c.location, 200);
+    }
+
+    function isValidStatsList(stats) {
+      return stats is list
+        && stats.size() <= 6
+        && (
+          stats.size() == 0 || (
+            stats[0] is map
+            && stats[0].keys().hasAll(['id', 'value', 'label'])
+            && stats[0].keys().hasOnly(['id', 'value', 'label'])
+            && isValidNonEmptyString(stats[0].id, 64)
+            && isValidNonEmptyString(stats[0].value, 32)
+            && isValidNonEmptyString(stats[0].label, 80)
+          )
+        );
+    }
+
+    function isValidSiteSettings(data) {
+      return data.keys().hasAll([
+          'profile',
+          'stats',
+          'developerCard',
+          'contact',
+          'updatedAt',
+          'updatedBy'
+        ])
+        && data.keys().hasOnly([
+          'profile',
+          'stats',
+          'developerCard',
+          'contact',
+          'updatedAt',
+          'updatedBy'
+        ])
+        && isValidProfileMap(data.profile)
+        && isValidStatsList(data.stats)
+        && isValidDeveloperCardMap(data.developerCard)
+        && isValidContactMap(data.contact)
+        && data.updatedAt == request.time
+        && data.updatedBy == request.auth.uid;
+    }
+
+    function isValidProject(data, projectId) {
+      return data.keys().hasAll([
+          'id',
+          'title',
+          'category',
+          'year',
+          'summary',
+          'description',
+          'image',
+          'technologies',
+          'highlights',
+          'sortOrder',
+          'updatedAt',
+          'updatedBy'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'title',
+          'category',
+          'year',
+          'summary',
+          'description',
+          'image',
+          'technologies',
+          'highlights',
+          'liveUrl',
+          'githubUrl',
+          'sortOrder',
+          'updatedAt',
+          'updatedBy'
+        ])
+        && data.id == projectId
+        && isValidId(data.id)
+        && isValidNonEmptyString(data.title, 200)
+        && data.category in ['الويب', 'Flutter', 'قواعد البيانات', 'الشبكات']
+        && isValidNonEmptyString(data.year, 20)
+        && isValidNonEmptyString(data.summary, 500)
+        && isValidNonEmptyString(data.description, 4000)
+        && isValidOptionalString(data.image, 250000)
+        && isValidStringList(data.technologies, 15)
+        && isValidStringList(data.highlights, 15)
+        && (!('liveUrl' in data) || isValidOptionalString(data.liveUrl, 500))
+        && (!('githubUrl' in data) || isValidOptionalString(data.githubUrl, 500))
+        && data.sortOrder is number
+        && data.updatedAt == request.time
+        && data.updatedBy == request.auth.uid;
+    }
+
+    function isValidService(data, serviceId) {
+      return data.keys().hasAll([
+          'id',
+          'title',
+          'description',
+          'icon',
+          'deliverables',
+          'sortOrder',
+          'updatedAt',
+          'updatedBy'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'title',
+          'description',
+          'icon',
+          'deliverables',
+          'sortOrder',
+          'updatedAt',
+          'updatedBy'
+        ])
+        && data.id == serviceId
+        && isValidId(data.id)
+        && isValidNonEmptyString(data.title, 200)
+        && isValidNonEmptyString(data.description, 1000)
+        && isValidNonEmptyString(data.icon, 40)
+        && isValidStringList(data.deliverables, 15)
+        && data.sortOrder is number
+        && data.updatedAt == request.time
+        && data.updatedBy == request.auth.uid;
+    }
+
+    function isValidSkill(data, skillId) {
+      return data.keys().hasAll([
+          'id',
+          'title',
+          'description',
+          'icon',
+          'technologies',
+          'sortOrder',
+          'updatedAt',
+          'updatedBy'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'title',
+          'description',
+          'icon',
+          'technologies',
+          'sortOrder',
+          'updatedAt',
+          'updatedBy'
+        ])
+        && data.id == skillId
+        && isValidId(data.id)
+        && isValidNonEmptyString(data.title, 200)
+        && isValidNonEmptyString(data.description, 1000)
+        && isValidNonEmptyString(data.icon, 40)
+        && isValidStringList(data.technologies, 20)
+        && data.sortOrder is number
+        && data.updatedAt == request.time
+        && data.updatedBy == request.auth.uid;
+    }
+
+    function isValidAdminUser(data, adminUid) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'createdAt'])
+        && data.uid == adminUid
+        && isValidId(data.uid)
+        && isValidNonEmptyString(data.email, 200)
+        && data.createdAt == request.time;
+    }
+
+    // Site Settings (Document ID strictly 'main')
+    match /siteSettings/{settingId} {
+      allow get: if settingId == 'main';
+      allow list: if isAdmin();
+      allow create: if settingId == 'main'
+        && isValidSiteSettings(incoming())
+        && isAdmin();
+      allow update: if settingId == 'main'
+        && isValidSiteSettings(incoming())
+        && isAdmin()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'profile',
+          'stats',
+          'developerCard',
+          'contact',
+          'updatedAt',
+          'updatedBy'
+        ]);
+      allow delete: if false;
+    }
+
+    // Projects Collection
+    match /projects/{projectId} {
+      allow get: if isValidId(projectId);
+      allow list: if true;
+      allow create: if isValidId(projectId)
+        && isValidProject(incoming(), projectId)
+        && isAdmin();
+      allow update: if isValidId(projectId)
+        && isValidProject(incoming(), projectId)
+        && isAdmin()
+        && incoming().id == existing().id
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'category',
+          'year',
+          'summary',
+          'description',
+          'image',
+          'technologies',
+          'highlights',
+          'liveUrl',
+          'githubUrl',
+          'sortOrder',
+          'updatedAt',
+          'updatedBy'
+        ]);
+      allow delete: if isValidId(projectId) && isAdmin();
+    }
+
+    // Services Collection
+    match /services/{serviceId} {
+      allow get: if isValidId(serviceId);
+      allow list: if true;
+      allow create: if isValidId(serviceId)
+        && isValidService(incoming(), serviceId)
+        && isAdmin();
+      allow update: if isValidId(serviceId)
+        && isValidService(incoming(), serviceId)
+        && isAdmin()
+        && incoming().id == existing().id
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'description',
+          'icon',
+          'deliverables',
+          'sortOrder',
+          'updatedAt',
+          'updatedBy'
+        ]);
+      allow delete: if isValidId(serviceId) && isAdmin();
+    }
+
+    // Skills Collection
+    match /skills/{skillId} {
+      allow get: if isValidId(skillId);
+      allow list: if true;
+      allow create: if isValidId(skillId)
+        && isValidSkill(incoming(), skillId)
+        && isAdmin();
+      allow update: if isValidId(skillId)
+        && isValidSkill(incoming(), skillId)
+        && isAdmin()
+        && incoming().id == existing().id
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title',
+          'description',
+          'icon',
+          'technologies',
+          'sortOrder',
+          'updatedAt',
+          'updatedBy'
+        ]);
+      allow delete: if isValidId(skillId) && isAdmin();
+    }
+
+    // Admins Collection (Super-Admin only)
+    match /admins/{adminUid} {
+      allow get: if isValidId(adminUid) && isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isValidId(adminUid)
+        && isValidAdminUser(incoming(), adminUid)
+        && isSuperAdmin();
+      allow update: if false;
+      allow delete: if isValidId(adminUid) && isSuperAdmin();
+    }
+  }
+}
